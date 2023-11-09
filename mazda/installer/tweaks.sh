@@ -32,13 +32,63 @@ log_message()
 	/bin/fsync "${MYDIR}/installer_log.txt"
 }
 
+save_logs() {
+    df -h --total /dev /run >> "${MYDIR}/installer_log.txt"
+    lsusb >> "${MYDIR}/installer_log.txt"
+    free >> "${MYDIR}/installer_log.txt"
+    cat /proc/sys/vm/swappiness >> "${MYDIR}/installer_log.txt"
+    cp -a /tmp/mnt/data/headunit.log ${MYDIR}/headunit.log
+    rm -f /tmp/mnt/data/headunit.log
+    touch /tmp/mnt/data/headunit.log
+    hwclock --hctosys
+    log_message "Logs saved and re-initialized - $(date +'%D %T')"
+}
+
+space_check()
+{
+  DATA_PERSIST=$(df -h | (grep 'data_persist' || echo 0) | awk '{ print $5 " " $1 }')
+  _ROOTFS=$(df -h | (grep 'rootfs' || echo 0) | awk '{ print $5 " " $1 }')
+  _RESOURCES=$(df -h | (grep 'resources' || echo 0) | awk '{ print $5 " " $1 }')
+  USED=$(echo $DATA_PERSIST | awk '{ print $1}' | cut -d'%' -f1  )
+  USED_ROOTFS=$(echo $_ROOTFS | awk '{ print $1}' | cut -d'%' -f1  )
+  USED_RESOURCES=$(echo $_RESOURCES | awk '{ print $1}' | cut -d'%' -f1  )
+  if [ $APPS2RESOURCES -ne 1 ]
+  then
+    if [ $USED_ROOTFS -gt 94 ]
+    then
+      log_message "=============== WARNING: ROOT FILESYSTEM OVER ${USED_ROOTFS}% FULL!! ================"
+      APPS2RESOURCES=1
+      TESTBKUPS=1
+      KEEPBKUPS=1
+      [ $COMPAT_GROUP -eq 6 ] && v70_integrity_check
+    fi
+    if [ $APPS2RESOURCES -eq 1 ]
+    then
+      AIO_APP_DIR="/tmp/mnt/resources/aio/apps"
+      [ -e ${AIO_APP_DIR} ] || mkdir -p ${AIO_APP_DIR}
+      [ -e ${NEW_BKUP_DIR} ] || mkdir -p ${NEW_BKUP_DIR}
+      log_message "================= App Install Location set to resources ================="
+    fi
+  elif [ $USED_ROOTFS -gt 95 ]
+  then
+    log_message "======================== rootfs ${USED_ROOTFS}% used ================================"
+  fi
+  _ROOTFS=$(df -h | (grep 'rootfs' || echo 0) | awk '{ print $5 " " $1 }')
+  USED_ROOTFS=$(echo $_ROOTFS | awk '{ print $1}' | cut -d'%' -f1  )
+  if [ $USED_ROOTFS -ge 100 ]
+  then
+    rootfs_full_message
+  fi
+}
+
 #============================= DIALOG FUNCTIONS
 
 show_message() # $1 - title, $2 - message
 {
-	killall jci-dialog
+    sleep 5
+    killall -q jci-dialog
 	log_message "= POPUP INFO: $*\n"
-	/jci/tools/jci-dialog --info --title="$1" --text="$2" --no-cancel
+	/jci/tools/jci-dialog --info --title="$1" --text="$2" --no-cancel &
 }
 
 show_confirmation() # $1 - title, $2 - message
@@ -136,8 +186,9 @@ modify_cmu_files()
             log_message "backing up file first ... "
             if cp -a /jci/scripts/stage_wifi.sh /jci/scripts/stage_wifi.sh.bak; then
                 echo "# Android Auto start" >> /jci/scripts/stage_wifi.sh
-                echo "headunit-wrapper &" >> /jci/scripts/stage_wifi.sh
                 echo "check-usb.sh &" >> /jci/scripts/stage_wifi.sh
+                echo "headunit-wrapper &" >> /jci/scripts/stage_wifi.sh
+#                 echo "/jci/scripts/jci-wifiap.sh restart &" >> /jci/scripts/stage_wifi.sh
                 log_message "autostart entry added to /jci/scripts/stage_wifi.sh ... DONE\n"
             else
                 log_message "backup failed so leaving file as is - there will be no autostart. FAILED\n"
@@ -145,10 +196,13 @@ modify_cmu_files()
         else
             log_message "backup exists ... "
             echo "# Android Auto start" >> /jci/scripts/stage_wifi.sh
+            echo "check-usb.sh &" >> /jci/scripts/stage_wifi.sh
             echo "headunit-wrapper &" >> /jci/scripts/stage_wifi.sh
+#             echo "/jci/scripts/jci-wifiap.sh restart &" >> /jci/scripts/stage_wifi.sh
             log_message "autostart entry added to /jci/scripts/stage_wifi.sh ... DONE\n"
         fi
     fi
+    cp -a /jci/scripts/* ${MYDIR}/backup
 }
 
 revert_cmu_files()
@@ -201,6 +255,7 @@ revert_cmu_files()
             sed -i '/# Android Auto start/d' /jci/scripts/stage_wifi.sh &&
             sed -i '/headunit-wrapper/d' /jci/scripts/stage_wifi.sh &&
             sed -i '/check-usb.sh/d' /jci/scripts/stage_wifi.sh
+#             sed -i '/jci-wifiap.sh' /jci/scripts/stage_wifi.sh
             if [ $? == 0 ]; then
                 log_message "DONE\n"
             else
@@ -246,13 +301,14 @@ test_run()
     #make sure it can run. this will hopefully generate a more useful log for debugging that is easy to get if not
     log_message "\n\nRunning smoke test\n\n"
     /tmp/mnt/data_persist/dev/bin/headunit-wrapper test
-    cat /tmp/mnt/data/headunit.log >> "${MYDIR}/installer_log.txt"
-    if grep -Fq "###TESTMODE_OK###" /tmp/mnt/data/headunit.log; then
+    cat /data/headunit.log >> "${MYDIR}/headunit_log.txt"
+    if grep -Fq "###TESTMODE_OK###" /data/headunit.log; then
         log_message "\nTest looks good.\n"
     else
         log_message "\nTest went wrong.\n"
         show_message "TEST RUN FAILED" "Headunit binary launch failed. Check the log."
     fi
+    sleep 3
 }
 
 #============================= INSTALLATION STARTS HERE
@@ -273,12 +329,15 @@ fi
 # first test, if copy from MZD to sd card is working to test correct mount point
 log_message "Check mount point ... "
 check_mount_point
+log_message "Check storage space ... "
+space_check
 
 # ask if proceed with installation
 show_question "AA INSTALL SCRIPT" "Welcome to Android Auto installation script. Would you like to proceed?" "Proceed" "Abort"
 if [ $? -ne 0 ]; then
     log_message "Installation aborted.\n"
-    show_message "Aborted" "Script aborted. Please remove the USB drive. There is no need to reboot."
+    show_message "Aborted" "CMU status logged. You can now remove the USB drive!"
+    save_logs
     exit
 fi
 
@@ -314,9 +373,9 @@ if [ ${installed} -eq 0 ]; then
 
     modify_cmu_files
     copy_aa_binaries
-    test_run
 
     log_message "Installation complete!\n"
+#    test_run
     show_confirmation "DONE" "Android Auto has been installed. System will reboot now. Remember to remove USB drive."
 elif [ ${remove} -eq 1 ]; then
     # this is a removing path - installed=true, remove=true
@@ -336,12 +395,11 @@ else
     # remove all files and copy once again in case there were some orphaned files in CMU
     remove_aa_binaries
     copy_aa_binaries
-    test_run
-
+#    test_run
     log_message "Update complete!\n"
     show_confirmation "DONE" "Update complete. System will reboot now. Remember to remove USB drive."
 fi
-
+save_logs
 sleep 3
 reboot
 exit
