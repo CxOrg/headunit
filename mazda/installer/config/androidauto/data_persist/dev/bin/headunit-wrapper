@@ -72,11 +72,6 @@ start_headunit()
 # prevent conflict by Official AA
 # killall -q -9 aap_service carplayd L_jciCARPLAY L_jciAAPA
 
-# Give the io a reset each time we startup which seems to wakeup the GPS
-/jci/scripts/resetvip
-# Give it time to settle
-sleep 2
-
 # loop forever. every 5 seconds,
 while true
 do
